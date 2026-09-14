@@ -1,0 +1,14 @@
+[package]
+name = "iroh-migrator"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+iroh-blobs = { version = "0.28.1", default-features = false, features = ["fs-store"] }
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json"] }
+mongodb = "2"
+futures = "0.3"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+tempfile = "3"

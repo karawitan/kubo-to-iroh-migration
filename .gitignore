@@ -1,0 +1,10 @@
+# Rust
+offline-migrator/target/
+
+# Python
+iroh-shim/__pycache__/
+iroh-shim/*.pyc
+iroh-shim/.venv/
+
+# OS
+.DS_Store

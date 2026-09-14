@@ -1,0 +1,4 @@
+aiohttp>=3.9
+motor>=3.3
+blake3>=1.0
+prometheus_client>=0.20
