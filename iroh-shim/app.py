@@ -145,8 +145,9 @@ async def store_mapping(cid: str, iroh_hash: str, size: int):
     """Store a CID→iroh_hash mapping in MongoDB and cache."""
     _cid_cache[cid] = iroh_hash
     await mappings.update_one(
-        {"_id": cid},
+        {"$or": [{"cid": cid}, {"_id": cid}]},
         {"$set": {
+            "cid": cid,
             "iroh_hash": iroh_hash,
             "size": size,
             "migrated_at": time.time(),
@@ -204,8 +205,13 @@ async def gateway_ipfs(request: web.Request) -> web.StreamResponse:
         range_spec = range_header[6:].split(",")[0].strip()
         try:
             start_str, end_str = range_spec.split("-", 1)
-            start = int(start_str) if start_str else 0
-            end = int(end_str) if end_str else total_size - 1
+            if start_str:
+                start = int(start_str)
+                end = int(end_str) if end_str else total_size - 1
+            else:
+                # Suffix range: bytes=-N means the last N bytes
+                end = total_size - 1
+                start = max(0, total_size - int(end_str))
             if end >= total_size:
                 end = total_size - 1
             if start > end or start >= total_size:
@@ -312,15 +318,19 @@ async def api_pin_add(request: web.Request) -> web.Response:
     cid = request.query.get("arg", "")
     if not cid:
         raise web.HTTPBadRequest(text="Missing 'arg' parameter")
-    await mappings.update_one({"_id": cid}, {"$set": {"pinned": True}}, upsert=True)
+    doc = await mappings.find_one({"$or": [{"cid": cid}, {"_id": cid}]}, {"_id": 1})
+    if doc:
+        await mappings.update_one({"_id": doc["_id"]}, {"$set": {"pinned": True}})
+    else:
+        await mappings.insert_one({"_id": cid, "cid": cid, "pinned": True})
     return web.json_response({"Pins": [cid]})
 
 
 async def api_pin_ls(request: web.Request) -> web.Response:
     """POST /api/v0/pin/ls — list pinned CIDs."""
     pinned = {}
-    async for doc in mappings.find({"pinned": True}, {"_id": 1}):
-        cid = doc.get("_id")
+    async for doc in mappings.find({"pinned": True}, {"cid": 1}):
+        cid = doc.get("cid") or doc.get("_id")
         if isinstance(cid, str):
             pinned[cid] = {"Type": "recursive"}
     return web.json_response({"Keys": pinned})
@@ -331,7 +341,9 @@ async def api_pin_rm(request: web.Request) -> web.Response:
     cid = request.query.get("arg", "")
     if not cid:
         raise web.HTTPBadRequest(text="Missing 'arg' parameter")
-    await mappings.update_one({"_id": cid}, {"$set": {"pinned": False}})
+    await mappings.update_one(
+        {"$or": [{"cid": cid}, {"_id": cid}]}, {"$set": {"pinned": False}}
+    )
     return web.json_response({"Pins": [cid]})
 
 
@@ -388,14 +400,21 @@ async def api_id(request: web.Request) -> web.Response:
 
 async def api_repo_stat(request: web.Request) -> web.Response:
     # Count blobs on disk
+    num_objects = 0
+    repo_size = 0
     try:
-        num_objects = len(list(BLOBS_DIR.glob("*.data")))
+        for p in BLOBS_DIR.glob("*.data"):
+            num_objects += 1
+            try:
+                repo_size += p.stat().st_size
+            except OSError:
+                pass
     except Exception:
-        num_objects = 0
+        pass
     return web.json_response({
-        "RepoSize": 0,
+        "RepoSize": repo_size,
         "StorageMax": 0,
-        "NumObjects": str(num_objects),
+        "NumObjects": num_objects,
     })
 
 
