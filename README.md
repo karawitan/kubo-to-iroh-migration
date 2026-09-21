@@ -14,7 +14,8 @@ and **30+ dependent services**.
 
 | Component | Path | Description |
 |-----------|------|-------------|
-| **iroh-shim** | [`iroh-shim/`](iroh-shim/) | Kubo-compatible HTTP API + gateway shim over Iroh blob store |
+| **iroh-shim** | [`iroh-shim/`](iroh-shim/) | Kubo-compatible HTTP API + gateway shim over Iroh blob store (Python) |
+| **iroh-kubo-shim** | [`iroh-kubo-shim/`](iroh-kubo-shim/) | Rust port of the shim — proper FsStore writes, bao-tree hashing, CIDv1 identifiers |
 | **offline-migrator** | [`offline-migrator/`](offline-migrator/) | Rust utility to migrate Kubo block store → Iroh blob store |
 | **docs** | [`docs/`](docs/) | Architecture, migration guide, validation test plan |
 
@@ -27,8 +28,11 @@ A Python/aiohttp service that provides:
   `/api/v0/id`, `/api/v0/repo/stat`, `/api/v0/resolve`, `/api/v0/object/stat`,
   `/api/v0/dag/stat`, `/api/v0/stats/bw`, `/api/v0/swarm/peers`, `/api/v0/bitswap/stat`
 - **IPFS gateway**: `GET /ipfs/<CID>` with HTTP Range support (206 Partial Content)
-- **CID → Iroh hash resolution**: Looks up legacy CIDs in a MongoDB mapping
-  collection, resolves to BLAKE3 hashes, serves blobs from Iroh's `FsStore`
+- **CID → Iroh hash resolution**: Looks up legacy CIDv0s (`Qm…`) in a
+  MongoDB mapping collection, resolves to BLAKE3 hashes, serves blobs from
+  Iroh's `FsStore`. CIDv1s carrying a BLAKE3 multihash (`bafk…`) decode
+  natively — no mapping needed — and `/api/v0/add` emits `bafk…` CIDs for
+  post-migration content
 - **Prometheus metrics**: `/metrics` endpoint with request counters, latency
   histograms, cache hit/miss, blob count, disk usage, mapping count
 
@@ -37,14 +41,20 @@ modification after the underlying storage is migrated from Kubo to Iroh.
 
 ### offline-migrator
 
-A Rust utility that reads Kubo's UnixFS/DAG-PB block store and writes flat
-blobs to Iroh's blob store:
+A Rust utility that migrates Kubo-pinned content into Iroh's blob store:
 
-- Reads `.ipldblock` files from Kubo's `blocks/` directory
-- Unwraps UnixFS DAG-PB to extract raw content
-- Computes BLAKE3 hash of raw content
-- Writes `<blake3-hex>.data` files to Iroh's `blobs/data/` directory
+- Fetches pinned CIDs via `pin/ls`, then streams content via `/api/v0/cat`
+  (reassembled by Kubo) — or, with `--direct`, reads `.ipldblock` files
+  straight from Kubo's `blocks/` directory and reassembles UnixFS DAG-PB
+  leaf blocks into flat content
+- Computes the BLAKE3 hash of the reassembled content
+- Writes `<blake3-hex>.data` files plus `.obao4` outboards to Iroh's
+  `blobs/data/` directory, and commits `EntryState` records to the FsStore
+  `redb` database directly (no iroh daemon needed)
 - Records CID → BLAKE3 mapping in MongoDB
+- Supports `--skip-existing` resume (via existing redb entries) and
+  `--mappings-only` modes; atomic batched redb commits keep crash
+  recovery cheap
 
 This avoids re-uploading content through the API and preserves all existing
 CID references.
@@ -108,6 +118,7 @@ rewriting every consumer.
 - [iroh-blobs](https://github.com/n0-computer/iroh-blobs) — blob storage crate
 - [Upstream issue #262](https://github.com/n0-computer/iroh-blobs/issues/262) —
   discussion of Kubo compatibility patterns with the Iroh team
+- [Cutover writeup](docs/cutover-writeup.md) — the full migration story
 
 ## License
 

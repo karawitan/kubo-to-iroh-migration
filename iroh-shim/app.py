@@ -17,12 +17,15 @@ Translates:
   - POST /api/v0/swarm/peers    → return empty peer list
   - POST /api/v0/bitswap/stat   → return empty bitswap stats
 
-Looks up CID→iroh_hash in MongoDB (cid_iroh_mappings collection).
+CID resolution order: CIDv1/bafk… (blake3 multihash) decodes natively;
+CIDv0/legacy CIDs resolve via MongoDB (cid_iroh_mappings collection);
+raw 64-hex hashes are accepted when the blob exists on disk.
 Reads blobs from /data/iroh/blobs/data/<hash>.data
 """
 import os
 import sys
 import time
+import base64
 import hashlib
 import asyncio
 from pathlib import Path
@@ -91,6 +94,72 @@ mongo_client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URL)
 db = mongo_client[DB_NAME]
 mappings = db[COLLECTION]
 
+# ── CIDv1 (bafk…) ↔ BLAKE3 helpers ─────────────────────────────────────────
+# An iroh blob hash is a BLAKE3 digest. It is also a valid CIDv1 multihash
+# (multicodec 0x1e, 32-byte digest), so post-migration content can be
+# addressed with real CIDs (bafkr4i…) instead of bare hex. Only CIDv0
+# (Qm…, sha2-256 over DAG-PB) genuinely needs the MongoDB mapping.
+BLAKE3_MULTICODEC = 0x1E
+RAW_CODEC = 0x55
+
+
+def _varint(data: bytes, pos: int) -> tuple[int, int] | None:
+    result = 0
+    shift = 0
+    while pos < len(data):
+        b = data[pos]
+        pos += 1
+        result |= (b & 0x7F) << shift
+        if not b & 0x80:
+            return result, pos
+        shift += 7
+        if shift >= 64:
+            return None
+    return None
+
+
+def hash_hex_to_cidv1(hash_hex: str) -> str:
+    """Encode a BLAKE3 hash hex as CIDv1 (raw codec + blake3 multihash): bafk…"""
+    cid_bytes = bytes([0x01, RAW_CODEC, BLAKE3_MULTICODEC, 0x20]) + bytes.fromhex(hash_hex)
+    return "b" + base64.b32encode(cid_bytes).decode("ascii").lower().rstrip("=")
+
+
+def cidv1_to_hash(cid: str) -> str | None:
+    """Decode a CIDv1 carrying a BLAKE3 multihash (bafk…) to the hash hex.
+
+    Returns None for CIDv0 or CIDv1 with a non-blake3 multihash — those need
+    the MongoDB mapping. The codec field is ignored: any CIDv1 whose
+    multihash is blake3-256 maps to the same blob.
+    """
+    if not cid.startswith("b"):
+        return None
+    body = cid[1:]
+    try:
+        raw = base64.b32decode(body.upper() + "=" * (-len(body) % 8))
+    except Exception:
+        return None
+    pos = 0
+    v = _varint(raw, pos)
+    if v is None or v[0] != 0x01:
+        return None
+    pos = v[1]
+    v = _varint(raw, pos)  # codec
+    if v is None:
+        return None
+    pos = v[1]
+    v = _varint(raw, pos)  # multihash code
+    if v is None or v[0] != BLAKE3_MULTICODEC:
+        return None
+    pos = v[1]
+    v = _varint(raw, pos)  # digest length
+    if v is None or v[0] != 0x20:
+        return None
+    pos = v[1]
+    if len(raw) - pos != 0x20:
+        return None
+    return raw[pos:].hex()
+
+
 # ── In-memory cache: CID → iroh_hash (hex) ──────────────────────────────────
 _cid_cache: dict[str, str] = {}
 _cache_loaded = False
@@ -114,24 +183,35 @@ async def load_cache():
 async def lookup_iroh_hash(cid: str) -> str | None:
     """Look up the Iroh hash for a CID, with cache.
 
-    Handles three cases:
-    1. CIDv0/v1 (e.g., Qm...) → look up in cid_iroh_mappings.cid or _id
-    2. Iroh hash (64 hex chars) passed directly → look up in cid_iroh_mappings.iroh_hash
-    3. Cached result from previous lookup
+    Handles four cases:
+    1. CIDv1 with BLAKE3 multihash (bafk…) → decoded directly, no Mongo needed
+    2. CIDv0/legacy CIDv1 (e.g., Qm…) → look up in cid_iroh_mappings.cid or _id
+    3. Iroh hash (64 hex chars) passed directly → blob on disk, or
+       cid_iroh_mappings.iroh_hash
+    4. Cached result from previous lookup
     """
     if cid in _cid_cache:
         CACHE_HITS.labels(result="hit").inc()
         return _cid_cache[cid]
+    # CIDv1 bafk… decodes to the hash deterministically — no mapping needed
+    decoded = cidv1_to_hash(cid)
+    if decoded:
+        _cid_cache[cid] = decoded
+        CACHE_HITS.labels(result="hit").inc()
+        return decoded
     # Fallback to DB
     doc = await mappings.find_one({"$or": [{"cid": cid}, {"_id": cid}]})
     if doc and doc.get("iroh_hash"):
         _cid_cache[cid] = doc["iroh_hash"]
         CACHE_HITS.labels(result="miss").inc()
         return doc["iroh_hash"]
-    # If the input looks like an iroh hash (64 hex chars), try looking it up
-    # directly in the iroh_hash field — the caller may be using iroh hashes
-    # as content identifiers (post-migration content has no CIDv0)
+    # If the input looks like an iroh hash (64 hex chars), accept it directly
+    # when the blob exists — post-migration content may have no mapping entry
     if len(cid) == 64 and all(c in "0123456789abcdef" for c in cid.lower()):
+        if (BLOBS_DIR / f"{cid.lower()}.data").exists():
+            _cid_cache[cid] = cid.lower()
+            CACHE_HITS.labels(result="miss").inc()
+            return cid.lower()
         doc = await mappings.find_one({"iroh_hash": cid})
         if doc and doc.get("iroh_hash"):
             _cid_cache[cid] = doc["iroh_hash"]
@@ -280,9 +360,11 @@ async def api_add(request: web.Request) -> web.Response:
         raise web.HTTPBadRequest(text="No file in upload")
     data = await field.read()
     hash_hex = write_blob(data)
-    # For /add, the CID is the Iroh hash hex (we don't compute IPFS CIDs)
-    # But existing services expect a Qm... CID. We store the hash as the CID.
-    cid = hash_hex
+    # We can't compute a CIDv0 (Qm…) — that requires sha2-256 over DAG-PB.
+    # Emit a CIDv1 (bafk…) instead: a real CID that decodes back to the
+    # BLAKE3 hash, so it works with CID-parsing tooling and resolves here
+    # without a MongoDB lookup.
+    cid = hash_hex_to_cidv1(hash_hex)
     await store_mapping(cid, hash_hex, len(data))
     return web.json_response({
         "Name": field.filename or "file",
@@ -299,7 +381,7 @@ async def api_add_only_hash(request: web.Request) -> web.Response:
         raise web.HTTPBadRequest(text="No file in upload")
     data = await field.read()
     hash_hex = compute_iroh_hash(data)
-    cid = hash_hex
+    cid = hash_hex_to_cidv1(hash_hex)
     return web.json_response({
         "Name": field.filename or "file",
         "Hash": cid,

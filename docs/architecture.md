@@ -109,18 +109,32 @@ for maximum performance. This is safe because:
 
 ### Offline migrator
 
-The Rust utility reads Kubo's block store and writes to Iroh's blob store:
+The Rust utility (`offline-migrator/`) copies all Kubo-pinned content into
+Iroh's blob store. Two modes:
 
-1. Read `.ipldblock` files from `~/.ipfs/blocks/`
-2. Parse DAG-PB to extract UnixFS content
-3. For files: unwrap to raw bytes
-4. For directories: recursively process children
-5. Compute BLAKE3 hash of raw content
-6. Write `<blake3-hex>.data` to Iroh's `blobs/data/`
-7. Record CID → BLAKE3 mapping in MongoDB
+1. **Kubo API mode (default)** — `pin/ls` for the CID list, `/api/v0/cat`
+   for content. Kubo does the UnixFS DAG-PB reassembly; the migrator hashes
+   and stores the flat result. Requires a running Kubo daemon but no access
+   to its blockstore internals.
 
-This is an offline operation — both Kubo and Iroh are stopped during
-migration. The migrator processes blocks in parallel for throughput.
+2. **Direct mode (`--direct`)** — reads `.ipldblock` files straight from
+   Kubo's `blocks/` directory, parses DAG-PB, and reassembles leaf blocks
+   into flat content. Used when Kubo must stay offline; falls back to
+   already-migrated Iroh content for missing child blocks.
+
+Both modes then:
+
+3. Compute the BLAKE3 hash of the reassembled content (bao-tree outboard,
+   matching Iroh's hash format)
+4. Write `<blake3-hex>.data` + `<blake3-hex>.obao4` to Iroh's `blobs/data/`
+5. Commit `EntryState` records to the FsStore `redb` database in batches
+6. Record CID → BLAKE3 mapping in MongoDB
+
+Workers run in parallel (default 10), with a single batched DB-commit
+thread. Throughput: ~100+ CID/s / ~50+ MB/s in-process, vs ~12 CID/s when
+spawning `iroh blobs add` per CID. `--skip-existing` resumes by consulting
+the existing redb entries; `--mappings-only` rebuilds MongoDB mappings
+without rewriting blobs already on disk.
 
 ## HTTP Range support
 

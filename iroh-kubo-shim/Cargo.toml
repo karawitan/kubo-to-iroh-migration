@@ -1,0 +1,24 @@
+[package]
+name = "iroh-kubo-shim"
+version = "0.1.0"
+edition = "2024"
+description = "Kubo-compatible HTTP API + IPFS gateway shim over an Iroh FsStore"
+license = "MIT"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8", features = ["multipart"] }
+mongodb = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+futures = "0.3"
+blake3 = "1"
+hex = "0.4"
+iroh-base = { version = "0.28", features = ["redb"] }
+bao-tree = { version = "0.13", default-features = false }
+redb = "2"
+postcard = { version = "1", features = ["alloc", "use-std", "experimental-derive"] }
+prometheus = "0.13"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
