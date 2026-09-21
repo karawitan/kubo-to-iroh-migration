@@ -9,7 +9,7 @@ bao-tree = { version = "0.13", default-features = false }
 redb = "2"
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["json", "blocking"] }
-mongodb = "2"
+mongodb = "3.2.5"
 futures = "0.3"
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }

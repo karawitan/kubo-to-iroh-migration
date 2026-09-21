@@ -233,7 +233,7 @@ async fn lookup_iroh_hash(st: &AppState, cid: &str) -> Option<String> {
     // MongoDB: legacy CIDv0/v1 mappings
     let doc = st
         .mappings
-        .find_one(doc! { "$or": [{"cid": cid}, {"_id": cid}] }, None)
+        .find_one(doc! { "$or": [{"cid": cid}, {"_id": cid}] })
         .await
         .ok()??;
     if let Some(h) = doc.get_str("iroh_hash").ok() {
@@ -250,7 +250,7 @@ async fn lookup_iroh_hash(st: &AppState, cid: &str) -> Option<String> {
         }
         if let Ok(Some(doc)) = st
             .mappings
-            .find_one(doc! { "iroh_hash": cid }, None)
+            .find_one(doc! { "iroh_hash": cid })
             .await
         {
             if let Ok(h) = doc.get_str("iroh_hash") {
@@ -278,8 +278,8 @@ async fn store_mapping(st: &AppState, cid: &str, iroh_hash: &str, size: u64) {
                 "migrated_at": mongodb::bson::DateTime::now(),
                 "pinned": true,
             }},
-            mongodb::options::UpdateOptions::builder().upsert(true).build(),
         )
+        .upsert(true)
         .await;
 }
 
@@ -518,8 +518,8 @@ async fn api_pin_add(Query(q): Query<ArgQuery>, State(st): State<Arc<AppState>>)
         .update_one(
             doc! { "_id": &cid },
             doc! { "$set": { "pinned": true } },
-            mongodb::options::UpdateOptions::builder().upsert(true).build(),
         )
+        .upsert(true)
         .await;
     Json(serde_json::json!({ "Pins": [cid] })).into_response()
 }
@@ -533,7 +533,6 @@ async fn api_pin_rm(Query(q): Query<ArgQuery>, State(st): State<Arc<AppState>>) 
         .update_one(
             doc! { "_id": &cid },
             doc! { "$set": { "pinned": false } },
-            None,
         )
         .await;
     Json(serde_json::json!({ "Pins": [cid] })).into_response()
@@ -543,7 +542,7 @@ async fn api_pin_ls(State(st): State<Arc<AppState>>) -> Response {
     let mut keys = serde_json::Map::new();
     if let Ok(mut cursor) = st
         .mappings
-        .find(doc! { "pinned": true }, None)
+        .find(doc! { "pinned": true })
         .await
     {
         while let Some(Ok(doc)) = cursor.next().await {
@@ -681,12 +680,8 @@ async fn metrics(State(st): State<Arc<AppState>>) -> Response {
 async fn load_cache(st: &AppState) -> Result<()> {
     let mut cursor = st
         .mappings
-        .find(
-            doc! { "iroh_hash": { "$exists": true } },
-            mongodb::options::FindOptions::builder()
-                .projection(doc! { "_id": 1, "iroh_hash": 1, "cid": 1 })
-                .build(),
-        )
+        .find(doc! { "iroh_hash": { "$exists": true } })
+        .projection(doc! { "_id": 1, "iroh_hash": 1, "cid": 1 })
         .await?;
     let mut cache = st.cache.write().unwrap();
     while let Some(doc) = cursor.next().await {

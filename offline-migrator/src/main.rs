@@ -640,7 +640,7 @@ fn main() -> Result<()> {
     let rt2 = rt.clone();
     let cid_to_hash: std::collections::HashMap<String, [u8; 32]> = rt2.block_on(async move {
         let mut map = std::collections::HashMap::new();
-        let cursor = coll.find(mongodb::bson::doc! { "iroh_hash": { "$exists": true } }, None).await;
+        let cursor = coll.find(mongodb::bson::doc! { "iroh_hash": { "$exists": true } }).await;
         if let Ok(mut cursor) = cursor {
             while let Some(Ok(doc)) = cursor.next().await {
                 let cid = doc.get("cid").and_then(|v| v.as_str())
@@ -764,7 +764,7 @@ fn main() -> Result<()> {
                         let coll = collection.clone();
                         let mb = std::mem::take(&mut mongo_batch);
                         rt.block_on(async move {
-                            match coll.insert_many(mb, mongodb::options::InsertManyOptions::builder().ordered(false).build()).await {
+                            match coll.insert_many(mb).ordered(false).await {
                                 Ok(_) => {},
                                 Err(_) => {
                                     // Duplicate key errors are OK (already mapped)
@@ -798,7 +798,7 @@ fn main() -> Result<()> {
                     let coll = collection.clone();
                     let mb = std::mem::take(&mut mongo_batch);
                     rt.block_on(async move {
-                        match coll.insert_many(mb, mongodb::options::InsertManyOptions::builder().ordered(false).build()).await {
+                        match coll.insert_many(mb).ordered(false).await {
                             Ok(_) => {},
                             Err(_) => {},
                         }
